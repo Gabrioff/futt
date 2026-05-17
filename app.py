@@ -40,30 +40,27 @@ def build_tx():
         except Exception as e:
             return jsonify({"error": "Clave privada inválida."}), 400
 
-        # 2. LÓGICA DE COMPRA / VENTA (Idéntica a pump_buyer.py)
+        # 2. LÓGICA DE COMPRA / VENTA
         if opcion_action == 'buy':
             action = "buy"
             try:
-                amount = float(amount_input)
+                amount = float(amount_input) # Obligatorio que sea tipo Float en JSON
             except ValueError:
-                return jsonify({"error": "Para comprar, la cantidad de SOL debe ser un número válido."}), 400
+                return jsonify({"error": "Para comprar, la cantidad de SOL debe ser un número."}), 400
             denominatedInSol = "true"
             
         elif opcion_action == 'sell':
             action = "sell"
             porcentaje = str(amount_input).replace("%", "").strip()
-            
-            # Validar que el porcentaje sea numérico
             if not porcentaje.replace(".", "").isnumeric():
                 return jsonify({"error": "Porcentaje de venta inválido."}), 400
-                
             amount = f"{porcentaje}%"
             denominatedInSol = "false"
             
         else:
             return jsonify({"error": "Acción inválida. Utiliza 'buy' o 'sell'."}), 400
 
-        # 3. CONFIGURAR LOS PARÁMETROS DE PUMPPORTAL
+        # 3. CONFIGURAR LOS PARÁMETROS EXACTOS DE PUMPPORTAL
         payload = {
             "publicKey": public_key,
             "action": action,
@@ -75,20 +72,27 @@ def build_tx():
             "pool": "auto"
         }
 
-        # 🚀 PETICIÓN A PUMPPORTAL
+        # Agregamos Headers para forzar JSON y evitar bloqueos de Cloudflare
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+
+        # 🚀 PETICIÓN A PUMPPORTAL (El FIX está aquí: usar json=payload)
         try:
-            # Utilizamos data=payload como indica tu script original que funcionaba bien
             response = requests.post(
                 url="https://pumpportal.fun/api/trade-local", 
-                data=payload
+                json=payload, 
+                headers=headers
             )
             
+            # Si PumpPortal sigue fallando, ahora imprimirá la razón exacta
             if response.status_code != 200:
-                return jsonify({"error": f"Error de PumpPortal: {response.text}"}), 400
+                return jsonify({"error": f"{response.text}"}), 400
                 
             tx_bytes = response.content
         except Exception as e:
-            return jsonify({"error": f"Error de conexión con PumpPortal: {str(e)}"}), 500
+            return jsonify({"error": f"Error de red con PumpPortal: {str(e)}"}), 500
 
         # 4. DESERIALIZAR Y FIRMAR LA TRANSACCIÓN
         try:
@@ -110,13 +114,13 @@ def build_tx():
             
             result_json = rpc_response.json()
             
-            # Validación de Errores detallada (Idéntico al bot local)
+            # Validación de Errores de Solana
             if 'error' in result_json:
                 error_data = result_json['error']
                 err_msg_lower = str(error_data).lower()
                 
                 if "insufficient funds" in err_msg_lower or "0x1" in err_msg_lower:
-                    custom_err = "No tienes suficiente SOL. Asegúrate de tener para el Rent (~0.002 SOL) y Fees."
+                    custom_err = "No tienes suficiente SOL. Asegúrate de tener para el Rent y Fees."
                 elif "slippage" in err_msg_lower or "0x11" in err_msg_lower:
                     custom_err = "El precio cambió demasiado rápido (Slippage excedido)."
                 else:
