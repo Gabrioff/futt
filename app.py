@@ -13,6 +13,7 @@ from solders.rpc.config import RpcSendTransactionConfig
 app = Flask(__name__)
 CORS(app)
 
+# RPC de Helius para máxima velocidad
 RPC_URL = "https://mainnet.helius-rpc.com/?api-key=d644072d-c54e-4f39-afa4-126063e96146"
 
 @app.route('/', methods=['GET'])
@@ -22,34 +23,47 @@ def home():
 @app.route('/api/build-tx', methods=['POST'])
 def build_tx():
     try:
-        # Extraemos los datos que nos envía la extensión
+        # Extraemos los datos que nos envía la extensión (background.js)
         req_data = request.get_json(force=True)
         priv_key = req_data.get('privateKey', '').strip()
-        opcion_action = req_data.get('action', '').strip()
+        opcion_action = req_data.get('action', '').strip().lower()
         mint_address = req_data.get('mint', '').strip()
         amount_input = req_data.get('amount')
 
-        # 1. CARGAMOS LA BILLETERA
+        if not priv_key or not mint_address or not amount_input:
+            return jsonify({"error": "Faltan datos obligatorios (privateKey, mint, amount)."}), 400
+
+        # 1. CARGAR LA BILLETERA
         try:
             keypair = Keypair.from_base58_string(priv_key)
             public_key = str(keypair.pubkey())
         except Exception as e:
             return jsonify({"error": "Clave privada inválida."}), 400
 
-        # === EL SECRETO: FORMATO MATEMÁTICO STRICTO ===
-        # PumpPortal exige que 'amount' sea un NÚMERO (0.01) para compras
-        # Si le enviamos un texto ("0.01"), la API lo rechaza con 400 Bad Request
+        # 2. LÓGICA DE COMPRA / VENTA (Idéntica a pump_buyer.py)
         if opcion_action == 'buy':
             action = "buy"
-            amount = float(amount_input) # <--- CONVERSIÓN OBLIGATORIA A FLOAT
+            try:
+                amount = float(amount_input)
+            except ValueError:
+                return jsonify({"error": "Para comprar, la cantidad de SOL debe ser un número válido."}), 400
             denominatedInSol = "true"
-        else:
-            porcentaje = str(amount_input).replace("%", "").strip()
+            
+        elif opcion_action == 'sell':
             action = "sell"
+            porcentaje = str(amount_input).replace("%", "").strip()
+            
+            # Validar que el porcentaje sea numérico
+            if not porcentaje.replace(".", "").isnumeric():
+                return jsonify({"error": "Porcentaje de venta inválido."}), 400
+                
             amount = f"{porcentaje}%"
             denominatedInSol = "false"
+            
+        else:
+            return jsonify({"error": "Acción inválida. Utiliza 'buy' o 'sell'."}), 400
 
-        # 3. PARÁMETROS EXACTOS
+        # 3. CONFIGURAR LOS PARÁMETROS DE PUMPPORTAL
         payload = {
             "publicKey": public_key,
             "action": action,
@@ -61,59 +75,64 @@ def build_tx():
             "pool": "auto"
         }
 
-        # Cabecera para evadir a Cloudflare
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        }
-
         # 🚀 PETICIÓN A PUMPPORTAL
-        # Obligatorio usar json=payload para que mantenga el formato numérico del amount
-        response = requests.post(
-            url="https://pumpportal.fun/api/trade-local", 
-            json=payload,
-            headers=headers
-        )
-        
-        if response.status_code != 200:
-            return jsonify({"error": f"Error de PumpPortal: {response.text}"}), 400
+        try:
+            # Utilizamos data=payload como indica tu script original que funcionaba bien
+            response = requests.post(
+                url="https://pumpportal.fun/api/trade-local", 
+                data=payload
+            )
             
-        tx_bytes = response.content
+            if response.status_code != 200:
+                return jsonify({"error": f"Error de PumpPortal: {response.text}"}), 400
+                
+            tx_bytes = response.content
+        except Exception as e:
+            return jsonify({"error": f"Error de conexión con PumpPortal: {str(e)}"}), 500
 
-        # 4. Deserializar y Firmar (Idéntico a tu script)
-        tx = VersionedTransaction(VersionedTransaction.from_bytes(tx_bytes).message, [keypair])
+        # 4. DESERIALIZAR Y FIRMAR LA TRANSACCIÓN
+        try:
+            tx = VersionedTransaction(VersionedTransaction.from_bytes(tx_bytes).message, [keypair])
+        except Exception as e:
+            return jsonify({"error": f"Error al firmar la transacción: {str(e)}"}), 500
 
-        # 5. Enviar a Helius (Idéntico a tu script)
-        commitment = CommitmentLevel.Confirmed
-        config = RpcSendTransactionConfig(preflight_commitment=commitment)
-        txPayload = SendVersionedTransaction(tx, config)
+        # 5. ENVIAR LA TRANSACCIÓN A HELIUS
+        try:
+            commitment = CommitmentLevel.Confirmed
+            config = RpcSendTransactionConfig(preflight_commitment=commitment)
+            txPayload = SendVersionedTransaction(tx, config)
 
-        rpc_response = requests.post(
-            url=RPC_URL,
-            headers={"Content-Type": "application/json"},
-            data=txPayload.to_json()
-        )
-        
-        result_json = rpc_response.json()
-        
-        # Validación de Errores
-        if 'error' in result_json:
-            error_data = result_json['error']
-            err_msg_lower = str(error_data).lower()
+            rpc_response = requests.post(
+                url=RPC_URL,
+                headers={"Content-Type": "application/json"},
+                data=txPayload.to_json()
+            )
             
-            if "insufficient funds" in err_msg_lower or "0x1" in err_msg_lower:
-                custom_err = "No tienes suficiente SOL en la billetera."
-            elif "slippage" in err_msg_lower or "0x11" in err_msg_lower:
-                custom_err = "El precio cambió demasiado rápido (Slippage excedido)."
-            else:
-                custom_err = error_data.get('message', 'Error desconocido en Solana')
-            return jsonify({"error": custom_err}), 400
+            result_json = rpc_response.json()
             
-        # 6. Éxito
-        txSignature = result_json.get('result')
-        return jsonify({"signature": txSignature})
+            # Validación de Errores detallada (Idéntico al bot local)
+            if 'error' in result_json:
+                error_data = result_json['error']
+                err_msg_lower = str(error_data).lower()
+                
+                if "insufficient funds" in err_msg_lower or "0x1" in err_msg_lower:
+                    custom_err = "No tienes suficiente SOL. Asegúrate de tener para el Rent (~0.002 SOL) y Fees."
+                elif "slippage" in err_msg_lower or "0x11" in err_msg_lower:
+                    custom_err = "El precio cambió demasiado rápido (Slippage excedido)."
+                else:
+                    custom_err = f"La red rechazó la tx: {error_data.get('message')}"
+                    
+                return jsonify({"error": custom_err}), 400
+                
+            # 6. ÉXITO 🎉
+            txSignature = result_json.get('result')
+            return jsonify({"signature": txSignature, "success": True})
+            
+        except Exception as e:
+            return jsonify({"error": f"Error crítico al enviar al RPC: {str(e)}"}), 500
 
     except Exception as e:
-        return jsonify({"error": f"Error crítico: {str(e)}"}), 500
+        return jsonify({"error": f"Error general del servidor: {str(e)}"}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
