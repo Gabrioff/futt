@@ -9,7 +9,7 @@ from solders.commitment_config import CommitmentLevel
 from solders.rpc.requests import SendVersionedTransaction
 from solders.rpc.config import RpcSendTransactionConfig
 
-# === AQUÍ EMPIEZA EL SERVIDOR WEB (Lo que le faltaba a Render) ===
+# === AQUÍ EMPIEZA EL SERVIDOR WEB ===
 app = Flask(__name__)
 CORS(app)
 
@@ -29,17 +29,19 @@ def build_tx():
         mint_address = req_data.get('mint', '').strip()
         amount_input = req_data.get('amount')
 
-        # 1. CARGAMOS LA BILLETERA (Idéntico a tu script)
+        # 1. CARGAMOS LA BILLETERA
         try:
             keypair = Keypair.from_base58_string(priv_key)
             public_key = str(keypair.pubkey())
         except Exception as e:
             return jsonify({"error": "Clave privada inválida."}), 400
 
-        # === AQUÍ EMPIEZA TU LÓGICA EXACTA DE CONSOLA ===
+        # === EL SECRETO: FORMATO MATEMÁTICO STRICTO ===
+        # PumpPortal exige que 'amount' sea un NÚMERO (0.01) para compras
+        # Si le enviamos un texto ("0.01"), la API lo rechaza con 400 Bad Request
         if opcion_action == 'buy':
             action = "buy"
-            amount = amount_input # Se queda como float
+            amount = float(amount_input) # <--- CONVERSIÓN OBLIGATORIA A FLOAT
             denominatedInSol = "true"
         else:
             porcentaje = str(amount_input).replace("%", "").strip()
@@ -47,7 +49,7 @@ def build_tx():
             amount = f"{porcentaje}%"
             denominatedInSol = "false"
 
-        # 3. PARÁMETROS EXACTOS (Idéntico a tu script)
+        # 3. PARÁMETROS EXACTOS
         payload = {
             "publicKey": public_key,
             "action": action,
@@ -59,15 +61,16 @@ def build_tx():
             "pool": "auto"
         }
 
-        # Un pequeño disfraz para engañar al firewall, pero usando tu lógica "data=payload"
+        # Cabecera para evadir a Cloudflare
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         }
 
-        # Petición a PumpPortal (Usando data=payload como pediste)
+        # 🚀 PETICIÓN A PUMPPORTAL
+        # Obligatorio usar json=payload para que mantenga el formato numérico del amount
         response = requests.post(
             url="https://pumpportal.fun/api/trade-local", 
-            data=payload,
+            json=payload,
             headers=headers
         )
         
